@@ -1,0 +1,62 @@
+# Render blueprint — free tier.
+#
+# Postgres and Redis are deliberately NOT defined here. Render's free Postgres
+# is deleted 30 days after creation, which would take the whole database with
+# it. Neon's free Postgres does not expire, so the database lives there and
+# this file only describes the API process.
+#
+# Deploy: Render dashboard → New → Blueprint → pick this repo.
+
+services:
+  - type: web
+    name: phantom-api
+    runtime: docker
+    plan: free
+    region: frankfurt
+    rootDir: apps/api
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 4000
+
+      # Paste these in the dashboard — never commit them.
+      - key: DATABASE_URL          # Neon connection string, ?sslmode=require
+        sync: false
+      - key: REDIS_URL             # Upstash rediss:// URL
+        sync: false
+      - key: JWT_ACCESS_SECRET
+        sync: false
+      - key: JWT_REFRESH_SECRET
+        sync: false
+      - key: COOKIE_SECRET
+        sync: false
+      - key: ENCRYPTION_KEY
+        sync: false
+      - key: PLUGIN_API_KEY
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASSWORD
+        sync: false
+      - key: MAIL_FROM
+        sync: false
+
+      # Origins. WEB_ORIGIN must be the exact Vercel URL, no trailing slash —
+      # the CORS allow-list and the cross-site cookie check both read it.
+      - key: WEB_ORIGIN
+        sync: false
+      - key: API_ORIGIN
+        sync: false
+      - key: MC_HOST
+        sync: false
+      - key: MC_PORT
+        value: 25565

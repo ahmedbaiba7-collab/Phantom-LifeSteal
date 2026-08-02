@@ -1,0 +1,91 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    scroll-behavior: smooth;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  body {
+    @apply bg-void text-ink font-body antialiased;
+    text-rendering: optimizeLegibility;
+  }
+
+  /* Visible focus is not optional. Keyboard users navigate this site too. */
+  :focus-visible {
+    @apply outline-none ring-2 ring-neon ring-offset-2 ring-offset-void rounded-sm;
+  }
+
+  ::selection {
+    @apply bg-neon/30 text-white;
+  }
+
+  /* Numbers in tables and stats line up. */
+  .tabular {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  /* The glass surface used across cards, panels and the nav. */
+  .glass {
+    @apply relative rounded-2xl border border-edge bg-panel/70 backdrop-blur-xl shadow-panel;
+  }
+
+  .eyebrow {
+    @apply font-display text-eyebrow font-bold uppercase text-neon;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-xl px-5 py-3 font-display
+           text-sm font-bold uppercase tracking-widest transition-all duration-200
+           disabled:cursor-not-allowed disabled:opacity-50;
+  }
+
+  .btn-primary {
+    @apply btn bg-neon text-void hover:bg-neon-hot hover:shadow-neon active:scale-[0.98];
+  }
+
+  .btn-ghost {
+    @apply btn border border-edge bg-white/[0.02] text-ink hover:border-neon/50 hover:bg-neon/10;
+  }
+
+  .field {
+    @apply w-full rounded-xl border border-edge bg-void/60 px-4 py-3 text-ink
+           placeholder:text-muted/60 transition-colors
+           focus:border-neon/60 focus:outline-none focus:ring-2 focus:ring-neon/30;
+  }
+
+  .field-error {
+    @apply border-heart/60 focus:border-heart focus:ring-heart/25;
+  }
+}
+
+@layer utilities {
+  .container-page {
+    @apply mx-auto w-full max-w-6xl px-5 sm:px-8;
+  }
+
+  /* Hairline divider used instead of heavy borders between sections. */
+  .rule {
+    @apply h-px w-full bg-gradient-to-r from-transparent via-neon/25 to-transparent;
+  }
+}
+
+/* Every transform-based effect is switched off for anyone who asked for less motion. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}

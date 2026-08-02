@@ -1,0 +1,933 @@
+// LifeSteal Phantom — database schema
+// PostgreSQL 16 + Prisma. Money is always Int in minor units (cents / coins).
+// No raw secret is ever stored: tokens are kept as SHA-256 digests.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// IDENTITY
+// ============================================================
+
+model User {
+  id                String    @id @default(cuid())
+  email             String    @unique
+  emailVerifiedAt   DateTime?
+  username          String    @unique
+  passwordHash      String
+  passwordChangedAt DateTime  @default(now())
+
+  avatarUrl String?
+  bio       String? @db.VarChar(280)
+  locale    String  @default("en")
+
+  /// The coin wallet. Whole coins, never fractional — see CoinTransaction for
+  /// the ledger that backs this cached total.
+  coins       Int @default(0)
+  /// Lifetime real-money spend, in minor units. Used for loyalty tiers only.
+  totalSpent  Int @default(0)
+
+  status        UserStatus @default(ACTIVE)
+  lockedUntil   DateTime?
+  failedLogins  Int        @default(0)
+  twoFactorEnabled Boolean @default(false)
+
+  lastLoginAt DateTime?
+  lastLoginIp String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+
+  roles             UserRole[]
+  sessions          Session[]
+  verificationTokens VerificationToken[]
+  twoFactor         TwoFactorSecret?
+  recoveryCodes     RecoveryCode[]
+  minecraft         MinecraftAccount?
+  discord           DiscordLink?
+  stats             PlayerStats?
+  orders            Order[]
+  coinTransactions  CoinTransaction[]
+  coinPurchases     CoinPurchase[]
+  gifts             Gift[]            @relation("GiftSender")
+  receivedGifts     Gift[]            @relation("GiftRecipient")
+  tickets           Ticket[]
+  ticketMessages    TicketMessage[]
+  comments          Comment[]
+  commentLikes      CommentLike[]
+  votes             Vote[]
+  notifications     Notification[]
+  auditLogs         AuditLog[]        @relation("AuditActor")
+  securityEvents    SecurityEvent[]
+  punishments       Punishment[]      @relation("PunishedUser")
+  issuedPunishments Punishment[]      @relation("PunishmentStaff")
+  newsPosts         NewsPost[]
+  apiKeys           ApiKey[]
+
+  @@index([status])
+  @@index([createdAt])
+  @@map("users")
+}
+
+enum UserStatus {
+  ACTIVE
+  SUSPENDED
+  BANNED
+  DELETED
+}
+
+model Role {
+  id          String  @id @default(cuid())
+  key         String  @unique // guest, player, vip, vip_plus, mvp, legend, moderator, admin, owner, developer
+  name        String
+  description String?
+  color       String  @default("#A855F7")
+  weight      Int     @default(0) // higher outranks lower
+  isStaff     Boolean @default(false)
+  isDefault   Boolean @default(false)
+  isPurchasable Boolean @default(false)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  permissions RolePermission[]
+  users       UserRole[]
+
+  @@index([weight])
+  @@map("roles")
+}
+
+model RolePermission {
+  id         String @id @default(cuid())
+  roleId     String
+  permission String // e.g. "news.publish", "store.*", "*"
+
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([roleId, permission])
+  @@map("role_permissions")
+}
+
+model UserRole {
+  id        String    @id @default(cuid())
+  userId    String
+  roleId    String
+  grantedBy String?
+  expiresAt DateTime? // paid ranks can be timed
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+  @@index([expiresAt])
+  @@map("user_roles")
+}
+
+model MinecraftAccount {
+  id         String   @id @default(cuid())
+  userId     String   @unique
+  uuid       String   @unique
+  ign        String
+  verifiedAt DateTime?
+  linkCode   String?  @unique
+  createdAt  DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("minecraft_accounts")
+}
+
+model DiscordLink {
+  id            String   @id @default(cuid())
+  userId        String   @unique
+  discordId     String   @unique
+  username      String
+  avatar        String?
+  accessTokenEnc String?
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("discord_links")
+}
+
+// ============================================================
+// SESSIONS & VERIFICATION
+// ============================================================
+
+model Session {
+  id               String   @id @default(cuid())
+  userId           String
+  familyId         String // rotation family — reuse of a burned token kills the whole family
+  refreshTokenHash String   @unique
+  usedAt           DateTime? // set when rotated; presenting it again is reuse
+  revokedAt        DateTime?
+  revokedReason    String?
+
+  ip          String?
+  userAgent   String?  @db.VarChar(512)
+  deviceLabel String?
+  country     String?
+  trusted     Boolean  @default(false)
+
+  expiresAt    DateTime
+  lastActiveAt DateTime @default(now())
+  createdAt    DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("sessions")
+}
+
+model LoginAttempt {
+  id        String   @id @default(cuid())
+  email     String
+  ip        String
+  success   Boolean
+  reason    String?
+  userAgent String?  @db.VarChar(512)
+  createdAt DateTime @default(now())
+
+  @@index([email, createdAt])
+  @@index([ip, createdAt])
+  @@map("login_attempts")
+}
+
+model VerificationToken {
+  id        String                @id @default(cuid())
+  userId    String
+  tokenHash String                @unique
+  type      VerificationTokenType
+  payload   String? // e.g. pending new email
+  usedAt    DateTime?
+  expiresAt DateTime
+  createdAt DateTime              @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([expiresAt])
+  @@map("verification_tokens")
+}
+
+enum VerificationTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+  EMAIL_CHANGE
+  MC_LINK
+  TWO_FACTOR
+}
+
+model TwoFactorSecret {
+  id          String    @id @default(cuid())
+  userId      String    @unique
+  secretEnc   String // AES-256-GCM encrypted TOTP secret
+  confirmedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("two_factor_secrets")
+}
+
+model RecoveryCode {
+  id       String    @id @default(cuid())
+  userId   String
+  codeHash String
+  usedAt   DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("recovery_codes")
+}
+
+// ============================================================
+// GAMEPLAY
+// ============================================================
+
+model PlayerStats {
+  id     String @id @default(cuid())
+  userId String @unique
+  uuid   String @unique
+
+  kills        Int @default(0)
+  deaths       Int @default(0)
+  heartsStolen Int @default(0)
+  heartsLost   Int @default(0)
+  maxHearts    Int @default(10)
+  currentHearts Int @default(10)
+  killStreak   Int @default(0)
+  bestStreak   Int @default(0)
+  playtimeMinutes Int @default(0)
+  blocksMined  Int @default(0)
+  moneyBalance Int @default(0) // in-game economy, minor units
+  votes        Int @default(0)
+  lastSeenAt   DateTime?
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([kills(sort: Desc)])
+  @@index([heartsStolen(sort: Desc)])
+  @@index([moneyBalance(sort: Desc)])
+  @@index([playtimeMinutes(sort: Desc)])
+  @@map("player_stats")
+}
+
+model StatSnapshot {
+  id        String   @id @default(cuid())
+  uuid      String
+  day       DateTime @db.Date
+  kills     Int      @default(0)
+  deaths    Int      @default(0)
+  heartsStolen Int   @default(0)
+  playtimeMinutes Int @default(0)
+  moneyBalance Int   @default(0)
+
+  @@unique([uuid, day])
+  @@index([day])
+  @@map("stat_snapshots")
+}
+
+model Punishment {
+  id        String         @id @default(cuid())
+  userId    String
+  staffId   String?
+  type      PunishmentType
+  reason    String
+  evidence  String?
+  active    Boolean        @default(true)
+  expiresAt DateTime?
+  revokedAt DateTime?
+  createdAt DateTime       @default(now())
+
+  user  User  @relation("PunishedUser", fields: [userId], references: [id], onDelete: Cascade)
+  staff User? @relation("PunishmentStaff", fields: [staffId], references: [id])
+
+  @@index([userId, active])
+  @@map("punishments")
+}
+
+enum PunishmentType {
+  WARN
+  MUTE
+  KICK
+  TEMPBAN
+  BAN
+}
+
+// ============================================================
+// STORE
+// ============================================================
+
+model Product {
+  id          String      @id @default(cuid())
+  slug        String      @unique
+  name        String
+  description String
+  type        ProductType
+  price       Int // minor units
+  salePrice   Int?
+  imageUrl    String?
+  grantRoleId String? // rank products
+  grantCoins  Int? // coin bundles
+  commands    String[] // RCON commands executed on delivery
+  durationDays Int? // timed ranks
+  stock       Int? // null = unlimited
+
+  /// Rank-shop presentation. imageUrl above points at an asset under /public;
+  /// those files are pixel art and must render with image-rendering: pixelated.
+  tier        Int?
+  features    String[]    @default([])
+  permissions String[]    @default([])
+  category    String?
+
+  /// Whole coins. Null means the item is not sold in the coin shop; a product
+  /// may carry both prices and appear in both shops independently.
+  coinPrice   Int?
+  sold        Int         @default(0)
+  featured    Boolean     @default(false)
+  active      Boolean     @default(true)
+  sortOrder   Int         @default(0)
+  availableFrom DateTime?
+  availableTo   DateTime?
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  orderItems    OrderItem[]
+  coinPurchases CoinPurchase[]
+
+  @@index([type, active])
+  @@index([category, active])
+  @@index([coinPrice, active])
+  @@map("products")
+}
+
+enum ProductType {
+  RANK
+  CRATE
+  KEY
+  COINS
+  BUNDLE
+  COSMETIC
+  COMMAND
+  TITLE
+  TAG
+  PARTICLE
+  NICKNAME
+  BOOSTER
+  ITEM
+}
+
+/// Which wallet a product is bought with. A product may be listed in both
+/// stores, but the two prices are independent columns so a discount on one
+/// can never silently move the other.
+enum Currency {
+  MONEY
+  COINS
+}
+
+model Coupon {
+  id           String   @id @default(cuid())
+  code         String   @unique
+  percentOff   Int? // 1-100
+  amountOff    Int? // minor units
+  maxUses      Int?
+  uses         Int      @default(0)
+  perUserLimit Int      @default(1)
+  minSubtotal  Int      @default(0)
+  productTypes ProductType[]
+  expiresAt    DateTime?
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  orders Order[]
+
+  @@map("coupons")
+}
+
+model Order {
+  id             String      @id @default(cuid())
+  reference      String      @unique // human-readable invoice number
+  userId         String
+  idempotencyKey String
+  status         OrderStatus @default(PENDING)
+
+  subtotal Int
+  discount Int @default(0)
+  total    Int
+  currency String @default("USD")
+  couponId String?
+
+  ip        String?
+  createdAt DateTime @default(now())
+  paidAt    DateTime?
+  refundedAt DateTime?
+
+  user    User        @relation(fields: [userId], references: [id])
+  coupon  Coupon?     @relation(fields: [couponId], references: [id])
+  items   OrderItem[]
+  payment Payment?
+  deliveries Delivery[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([status, createdAt])
+  @@map("orders")
+}
+
+enum OrderStatus {
+  PENDING
+  PAID
+  DELIVERED
+  REFUNDED
+  CHARGEBACK
+  CANCELLED
+  FAILED
+}
+
+model OrderItem {
+  id        String @id @default(cuid())
+  orderId   String
+  productId String
+  name      String // snapshot — product may change or be deleted later
+  unitPrice Int
+  quantity  Int    @default(1)
+
+  order   Order   @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  product Product @relation(fields: [productId], references: [id])
+
+  @@map("order_items")
+}
+
+model Payment {
+  id         String   @id @default(cuid())
+  orderId    String   @unique
+  provider   String   @default("stripe")
+  providerId String   @unique
+  amount     Int
+  currency   String
+  status     String
+  rawEvent   Json?
+  createdAt  DateTime @default(now())
+
+  order Order @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@map("payments")
+}
+
+/// One row per command to run. A delivery belongs to either an Order (real
+/// money) or a CoinPurchase (coins) — never both, never neither. Queued rather
+/// than pushed so a server restart delays delivery instead of losing it.
+model Delivery {
+  id             String         @id @default(cuid())
+  orderId        String?
+  coinPurchaseId String?
+  targetUuid     String?
+  command        String
+  status      DeliveryStatus @default(PENDING)
+  attempts    Int            @default(0)
+  lastError   String?
+  deliveredAt DateTime?
+  createdAt   DateTime       @default(now())
+
+  order        Order?        @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  coinPurchase CoinPurchase? @relation(fields: [coinPurchaseId], references: [id], onDelete: Cascade)
+
+  @@index([status, attempts])
+  @@index([coinPurchaseId])
+  @@map("deliveries")
+}
+
+enum DeliveryStatus {
+  PENDING
+  DELIVERED
+  FAILED
+}
+
+model Gift {
+  id          String   @id @default(cuid())
+  senderId    String
+  recipientId String?
+  recipientIgn String?
+  productId   String
+  message     String?  @db.VarChar(280)
+  claimedAt   DateTime?
+  createdAt   DateTime @default(now())
+
+  sender    User  @relation("GiftSender", fields: [senderId], references: [id])
+  recipient User? @relation("GiftRecipient", fields: [recipientId], references: [id])
+
+  @@map("gifts")
+}
+
+// ============================================================
+// CONTENT
+// ============================================================
+
+model NewsPost {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  excerpt     String   @db.VarChar(320)
+  body        String // sanitised HTML
+  coverUrl    String?
+  category    String   @default("update")
+  tags        String[]
+  authorId    String
+  pinned      Boolean  @default(false)
+  published   Boolean  @default(false)
+  publishedAt DateTime?
+  views       Int      @default(0)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deletedAt   DateTime?
+
+  author   User      @relation(fields: [authorId], references: [id])
+  comments Comment[]
+
+  @@index([published, publishedAt(sort: Desc)])
+  @@map("news_posts")
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  postId    String
+  userId    String
+  body      String   @db.VarChar(2000)
+  hidden    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  deletedAt DateTime?
+
+  post  NewsPost      @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user  User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  likes CommentLike[]
+
+  @@index([postId, createdAt])
+  @@map("comments")
+}
+
+model CommentLike {
+  id        String   @id @default(cuid())
+  commentId String
+  userId    String
+  createdAt DateTime @default(now())
+
+  comment Comment @relation(fields: [commentId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([commentId, userId])
+  @@map("comment_likes")
+}
+
+model WikiCategory {
+  id        String        @id @default(cuid())
+  slug      String        @unique
+  name      String
+  icon      String?
+  sortOrder Int           @default(0)
+  articles  WikiArticle[]
+
+  @@map("wiki_categories")
+}
+
+model WikiArticle {
+  id         String   @id @default(cuid())
+  slug       String   @unique
+  title      String
+  summary    String   @db.VarChar(320)
+  body       String
+  categoryId String
+  keywords   String[]
+  sortOrder  Int      @default(0)
+  published  Boolean  @default(true)
+  updatedAt  DateTime @updatedAt
+  createdAt  DateTime @default(now())
+
+  category WikiCategory @relation(fields: [categoryId], references: [id], onDelete: Cascade)
+
+  @@index([categoryId, sortOrder])
+  @@map("wiki_articles")
+}
+
+model Faq {
+  id        String @id @default(cuid())
+  question  String
+  answer    String
+  category  String @default("general")
+  sortOrder Int    @default(0)
+
+  @@map("faqs")
+}
+
+model ServerEvent {
+  id          String   @id @default(cuid())
+  slug        String   @unique
+  title       String
+  description String
+  imageUrl    String?
+  startsAt    DateTime
+  endsAt      DateTime?
+  rewards     String?
+  createdAt   DateTime @default(now())
+
+  @@index([startsAt])
+  @@map("server_events")
+}
+
+// ============================================================
+// SUPPORT
+// ============================================================
+
+model Ticket {
+  id        String         @id @default(cuid())
+  reference String         @unique
+  userId    String
+  type      TicketType
+  subject   String         @db.VarChar(160)
+  status    TicketStatus   @default(OPEN)
+  priority  TicketPriority @default(NORMAL)
+  assigneeId String?
+  closedAt  DateTime?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+
+  user     User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages TicketMessage[]
+
+  @@index([status, createdAt])
+  @@index([userId])
+  @@map("tickets")
+}
+
+enum TicketType {
+  SUPPORT
+  BUG
+  REPORT
+  APPEAL
+  SUGGESTION
+}
+
+enum TicketStatus {
+  OPEN
+  PENDING
+  ANSWERED
+  CLOSED
+}
+
+enum TicketPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
+model TicketMessage {
+  id         String   @id @default(cuid())
+  ticketId   String
+  authorId   String
+  body       String   @db.VarChar(5000)
+  staffOnly  Boolean  @default(false)
+  attachments String[]
+  createdAt  DateTime @default(now())
+
+  ticket Ticket @relation(fields: [ticketId], references: [id], onDelete: Cascade)
+  author User   @relation(fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([ticketId, createdAt])
+  @@map("ticket_messages")
+}
+
+// ============================================================
+// VOTING
+// ============================================================
+
+model VoteSite {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  name        String
+  url         String
+  cooldownHours Int    @default(24)
+  rewardCoins Int      @default(50)
+  active      Boolean  @default(true)
+  sortOrder   Int      @default(0)
+
+  votes Vote[]
+
+  @@map("vote_sites")
+}
+
+model Vote {
+  id        String   @id @default(cuid())
+  userId    String
+  siteId    String
+  ip        String?
+  verified  Boolean  @default(false)
+  rewarded  Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  user User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  site VoteSite @relation(fields: [siteId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@index([siteId, createdAt])
+  @@map("votes")
+}
+
+model VoteReward {
+  id          String @id @default(cuid())
+  streakDay   Int    @unique
+  coins       Int
+  description String
+  commands    String[]
+
+  @@map("vote_rewards")
+}
+
+// ============================================================
+// OPS
+// ============================================================
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  actorId    String?
+  actorLabel String? // preserved if the actor is later deleted
+  action     String
+  targetType String?
+  targetId   String?
+  before     Json?
+  after      Json?
+  ip         String?
+  userAgent  String?  @db.VarChar(512)
+  requestId  String?
+  createdAt  DateTime @default(now())
+
+  actor User? @relation("AuditActor", fields: [actorId], references: [id])
+
+  @@index([action, createdAt])
+  @@index([actorId, createdAt])
+  @@index([targetType, targetId])
+  @@map("audit_logs")
+}
+
+model SecurityEvent {
+  id        String            @id @default(cuid())
+  userId    String?
+  type      SecurityEventType
+  severity  Int               @default(1) // 1 info .. 4 critical
+  ip        String?
+  userAgent String?           @db.VarChar(512)
+  details   Json?
+  createdAt DateTime          @default(now())
+
+  user User? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([type, createdAt])
+  @@index([userId, createdAt])
+  @@map("security_events")
+}
+
+enum SecurityEventType {
+  LOGIN_FAILED
+  ACCOUNT_LOCKED
+  NEW_DEVICE
+  SUSPICIOUS_LOGIN
+  TOKEN_REUSE
+  PASSWORD_CHANGED
+  TWO_FACTOR_ENABLED
+  TWO_FACTOR_DISABLED
+  PERMISSION_CHANGED
+  RATE_LIMIT_TRIPPED
+  CSRF_REJECTED
+}
+
+model Notification {
+  id        String   @id @default(cuid())
+  userId    String
+  title     String
+  body      String
+  href      String?
+  icon      String?
+  readAt    DateTime?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+  @@map("notifications")
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  name       String
+  keyHash    String    @unique
+  prefix     String // shown in the UI so a key is identifiable without revealing it
+  scopes     String[]
+  ownerId    String?
+  lastUsedAt DateTime?
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  owner User? @relation(fields: [ownerId], references: [id])
+
+  @@map("api_keys")
+}
+
+model SiteSetting {
+  key       String   @id
+  value     Json
+  updatedAt DateTime @updatedAt
+  updatedBy String?
+
+  @@map("site_settings")
+}
+
+model Backup {
+  id         String   @id @default(cuid())
+  filename   String   @unique
+  sizeBytes  BigInt
+  checksum   String
+  trigger    String   @default("cron")
+  createdAt  DateTime @default(now())
+
+  @@map("backups")
+}
+
+
+// ───────────────────────────── Coins economy ─────────────────────────────
+
+enum CoinReason {
+  VOTE_REWARD
+  DAILY_REWARD
+  IN_GAME_EARN
+  SHOP_PURCHASE
+  STORE_BONUS
+  GIFT_SENT
+  GIFT_RECEIVED
+  ADMIN_GRANT
+  ADMIN_REVOKE
+  REFUND
+}
+
+/// Append-only double-entry-ish ledger. `User.coins` is a cached running
+/// total; this table is the truth. Every mutation writes a row inside the
+/// same transaction that moves the balance, so the two can always be
+/// reconciled — and a disagreement is a detectable incident rather than a
+/// silent loss of someone's currency.
+model CoinTransaction {
+  id           String     @id @default(cuid())
+  userId       String
+  user         User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  /// Signed: positive credits the player, negative debits them.
+  amount       Int
+  balanceAfter Int
+  reason       CoinReason
+  description  String     @db.VarChar(200)
+
+  /// Free-form link to whatever caused the movement (order id, vote id,
+  /// coin purchase id). Not a foreign key — the referent varies by reason.
+  referenceId  String?
+  actorId      String?
+
+  createdAt    DateTime   @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([reason, createdAt])
+  @@map("coin_transactions")
+}
+
+/// A coin-shop redemption. Separate from Order, which is the real-money path
+/// with payments and invoices attached — conflating them would mean every
+/// query about revenue had to remember to exclude coin rows.
+model CoinPurchase {
+  id             String    @id @default(cuid())
+  userId         String
+  user           User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  productId      String
+  product        Product   @relation(fields: [productId], references: [id])
+
+  quantity       Int       @default(1)
+  coinsSpent     Int
+  /// Client-supplied key: a double-tapped Confirm button spends once.
+  idempotencyKey String
+
+  deliveredAt    DateTime?
+  createdAt      DateTime  @default(now())
+
+  deliveries     Delivery[]
+
+  @@unique([userId, idempotencyKey])
+  @@index([userId, createdAt(sort: Desc)])
+  @@map("coin_purchases")
+}
